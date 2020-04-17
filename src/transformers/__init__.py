@@ -90,6 +90,7 @@ from .file_utils import (
     cached_path,
     is_tf_available,
     is_torch_available,
+    is_flax_available
 )
 from .hf_argparser import HfArgumentParser
 
