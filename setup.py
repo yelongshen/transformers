@@ -70,7 +70,7 @@ extras["sklearn"] = ["scikit-learn"]
 extras["tf"] = ["tensorflow<=2.1.0"]
 extras["tf-cpu"] = ["tensorflow-cpu<=2.1.0"]
 extras["torch"] = ["torch"]
-extras["flax"] = ["flax"]
+extras["flax"] = ["jaxlib", "jax", "flax"]
 
 extras["serving"] = ["pydantic", "uvicorn", "fastapi", "starlette"]
 extras["all"] = extras["serving"] + ["tensorflow", "torch"]
