@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Fine-tuning the library models for language modeling on a text file (GPT, GPT-2, BERT, RoBERTa).
-GPT and GPT-2 are fine-tuned using a causal language modeling (CLM) loss while BERT and RoBERTa are fine-tuned
-using a masked language modeling (MLM) loss.
+Fine-tuning the library models for language modeling on a text file (GPT, GPT-2, CTRL, BERT, RoBERTa, XLNet).
+GPT, GPT-2 and CTRL are fine-tuned using a causal language modeling (CLM) loss. BERT and RoBERTa are fine-tuned
+using a masked language modeling (MLM) loss. XLNet is fine-tuned using a permutation language modeling (PLM) loss.
 """
 
 
@@ -24,7 +24,10 @@ import logging
 import math
 import os
 from dataclasses import dataclass, field
+from glob import glob
 from typing import Optional
+
+from torch.utils.data import ConcatDataset
 
 from transformers import (
     CONFIG_MAPPING,
@@ -33,8 +36,11 @@ from transformers import (
     AutoModelWithLMHead,
     AutoTokenizer,
     DataCollatorForLanguageModeling,
+    DataCollatorForPermutationLanguageModeling,
+    DataCollatorForWholeWordMask,
     HfArgumentParser,
     LineByLineTextDataset,
+    LineByLineWithRefDataset,
     PreTrainedTokenizer,
     TextDataset,
     Trainer,
@@ -86,9 +92,20 @@ class DataTrainingArguments:
     train_data_file: Optional[str] = field(
         default=None, metadata={"help": "The input training data file (a text file)."}
     )
+    train_data_files: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "The input training data files (multiple files in glob format). "
+            "Very often splitting large files to smaller files can prevent tokenizer going out of memory"
+        },
+    )
     eval_data_file: Optional[str] = field(
         default=None,
         metadata={"help": "An optional input evaluation data file to evaluate the perplexity on (a text file)."},
+    )
+    chinese_ref_file: Optional[str] = field(
+        default=None,
+        metadata={"help": "An optional input ref data file for whole word mask in Chinees."},
     )
     line_by_line: bool = field(
         default=False,
@@ -98,8 +115,18 @@ class DataTrainingArguments:
     mlm: bool = field(
         default=False, metadata={"help": "Train with masked-language modeling loss instead of language modeling."}
     )
+    whole_word_mask: bool = field(default=False, metadata={"help": "Whether ot not to use whole word mask."})
     mlm_probability: float = field(
         default=0.15, metadata={"help": "Ratio of tokens to mask for masked language modeling loss"}
+    )
+    plm_probability: float = field(
+        default=1 / 6,
+        metadata={
+            "help": "Ratio of length of a span of masked tokens to surrounding context length for permutation language modeling."
+        },
+    )
+    max_span_length: int = field(
+        default=5, metadata={"help": "Maximum length of a span of masked tokens for permutation language modeling."}
     )
 
     block_size: int = field(
@@ -115,14 +142,40 @@ class DataTrainingArguments:
     )
 
 
-def get_dataset(args: DataTrainingArguments, tokenizer: PreTrainedTokenizer, evaluate=False):
-    file_path = args.eval_data_file if evaluate else args.train_data_file
-    if args.line_by_line:
-        return LineByLineTextDataset(tokenizer=tokenizer, file_path=file_path, block_size=args.block_size)
+def get_dataset(
+    args: DataTrainingArguments,
+    tokenizer: PreTrainedTokenizer,
+    evaluate: bool = False,
+    cache_dir: Optional[str] = None,
+):
+    def _dataset(file_path):
+        if args.line_by_line:
+            if args.chinese_ref_file is not None:
+                if not args.whole_word_mask or not args.mlm:
+                    raise ValueError("You need to set world whole masking and mlm to True for Chinese Whole Word Mask")
+                return LineByLineWithRefDataset(
+                    tokenizer=tokenizer,
+                    file_path=file_path,
+                    block_size=args.block_size,
+                    ref_path=args.chinese_ref_file,
+                )
+
+            return LineByLineTextDataset(tokenizer=tokenizer, file_path=file_path, block_size=args.block_size)
+        else:
+            return TextDataset(
+                tokenizer=tokenizer,
+                file_path=file_path,
+                block_size=args.block_size,
+                overwrite_cache=args.overwrite_cache,
+                cache_dir=cache_dir,
+            )
+
+    if evaluate:
+        return _dataset(args.eval_data_file)
+    elif args.train_data_files:
+        return ConcatDataset([_dataset(f) for f in glob(args.train_data_files)])
     else:
-        return TextDataset(
-            tokenizer=tokenizer, file_path=file_path, block_size=args.block_size, overwrite_cache=args.overwrite_cache
-        )
+        return _dataset(args.train_data_file)
 
 
 def main():
@@ -138,7 +191,6 @@ def main():
             "Cannot do evaluation without an evaluation data file. Either supply a file to --eval_data_file "
             "or remove the --do_eval argument."
         )
-
     if (
         os.path.exists(training_args.output_dir)
         and os.listdir(training_args.output_dir)
@@ -207,8 +259,8 @@ def main():
 
     if config.model_type in ["bert", "roberta", "distilbert", "camembert"] and not data_args.mlm:
         raise ValueError(
-            "BERT and RoBERTa-like models do not have LM heads but masked LM heads. They must be run using the --mlm "
-            "flag (masked language modeling)."
+            "BERT and RoBERTa-like models do not have LM heads but masked LM heads. They must be run using the"
+            "--mlm flag (masked language modeling)."
         )
 
     if data_args.block_size <= 0:
@@ -219,11 +271,29 @@ def main():
 
     # Get datasets
 
-    train_dataset = get_dataset(data_args, tokenizer=tokenizer) if training_args.do_train else None
-    eval_dataset = get_dataset(data_args, tokenizer=tokenizer, evaluate=True) if training_args.do_eval else None
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer, mlm=data_args.mlm, mlm_probability=data_args.mlm_probability
+    train_dataset = (
+        get_dataset(data_args, tokenizer=tokenizer, cache_dir=model_args.cache_dir) if training_args.do_train else None
     )
+    eval_dataset = (
+        get_dataset(data_args, tokenizer=tokenizer, evaluate=True, cache_dir=model_args.cache_dir)
+        if training_args.do_eval
+        else None
+    )
+    if config.model_type == "xlnet":
+        data_collator = DataCollatorForPermutationLanguageModeling(
+            tokenizer=tokenizer,
+            plm_probability=data_args.plm_probability,
+            max_span_length=data_args.max_span_length,
+        )
+    else:
+        if data_args.mlm and data_args.whole_word_mask:
+            data_collator = DataCollatorForWholeWordMask(
+                tokenizer=tokenizer, mlm_probability=data_args.mlm_probability
+            )
+        else:
+            data_collator = DataCollatorForLanguageModeling(
+                tokenizer=tokenizer, mlm=data_args.mlm, mlm_probability=data_args.mlm_probability
+            )
 
     # Initialize our Trainer
     trainer = Trainer(
