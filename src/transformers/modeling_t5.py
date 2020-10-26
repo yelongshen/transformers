@@ -549,11 +549,11 @@ class T5Block(nn.Module):
                 kv=encoder_hidden_states,
                 attention_mask=encoder_attention_mask,
                 position_bias=encoder_decoder_position_bias,
-                head_mask=head_mask,
+                #head_mask=head_mask,
                 past_key_value=cross_attn_past_key_value,
                 query_length=query_length,
                 use_cache=use_cache,
-                output_attentions=output_attentions,
+                #output_attentions=output_attentions,
             )
             hidden_states = cross_attention_outputs[0]
             # Combine self attn and cross attn key value states
@@ -1048,7 +1048,6 @@ class T5Model(T5PreTrainedModel):
             encoder_hidden_states=encoder_outputs.hidden_states,
             encoder_attentions=encoder_outputs.attentions,
         )
-
 
 @add_start_docstrings("""T5 Model with a `language modeling` head on top. """, T5_START_DOCSTRING)
 class T5ForConditionalGeneration(T5PreTrainedModel):
